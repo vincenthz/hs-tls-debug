@@ -9,6 +9,7 @@ import System.Console.CmdArgs
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 
+import qualified Data.List as List
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Exception (finally, try, throw, catch, SomeException)
@@ -16,8 +17,8 @@ import Control.Monad (when, forever)
 
 import Data.Char (isDigit)
 
-import Data.Certificate.PEM
-import Data.Certificate.X509
+import Data.PEM(pemParseBS, pemName, pemContent)
+import Data.Certificate.X509(X509, decodeCertificate)
 import qualified Data.Certificate.KeyRSA as KeyRSA
 
 import qualified Crypto.Random.AESCtr as RNG
@@ -44,7 +45,7 @@ readOne h = do
 		Right True  -> B.hGetNonBlocking h 4096
 		Right False -> return B.empty
 
-tlsclient :: Handle -> TLSCtx Handle -> IO ()
+tlsclient :: Handle -> TLSCtx -> IO ()
 tlsclient srchandle dsthandle = do
 	hSetBuffering srchandle NoBuffering
 
@@ -75,7 +76,7 @@ tlsserver srchandle dsthandle = do
 		d <- recvData srchandle
 		putStrLn ("received: " ++ show d)
 		sendData srchandle (L.pack $ map (toEnum . fromEnum) "this is some data")
-		hFlush (ctxConnection srchandle)
+		backendFlush (ctxConnection srchandle)
 		return False
 	putStrLn "end"
 
@@ -86,7 +87,7 @@ clientProcess certs handle dsthandle dbg sessionStorage _ = do
 		, loggingPacketRecv = putStrLn . ("debug: recv: " ++)
 		}
 
-	let serverstate = defaultParams
+	let serverstate = defaultParamsServer
 		{ pAllowedVersions = [SSL3,TLS10,TLS11,TLS12]
 		, pCiphers         = ciphers
 		, pCertificates    = certs
@@ -100,29 +101,41 @@ clientProcess certs handle dsthandle dbg sessionStorage _ = do
 			, onSessionEstablished = \s d -> modifyMVar_ storage (\l -> return $ (s,d) : l)
 			}
 
-	ctx <- server serverState' rng handle
+	ctx <- contextNewOnHandle handle serverState' rng
 	tlsserver ctx dsthandle
 
+-- | Read a X.509 certificate from the named file.
+--
 readCertificate :: FilePath -> IO X509
 readCertificate filepath = do
-	content <- B.readFile filepath
-	let certdata = case parsePEMCert content of
-		Nothing -> error ("no valid certificate section")
-		Just x  -> x
-	let cert = case decodeCertificate $ L.fromChunks [certdata] of
-		Left err -> error ("cannot decode certificate: " ++ err)
-		Right x  -> x
-	return cert
+  content <- B.readFile filepath
+  case pemParseBS content of
+    Left err -> error err
+    Right pems ->
+      case List.find ((== "CERTIFICATE") . pemName) pems of
+        Just pem ->
+          case decodeCertificate $ L.fromChunks [pemContent pem] of
+            Left err -> error err
+            Right x -> return x;
+        Nothing -> error "no certificate file"
 
+
+-- | Read a private key from the named file. It must match the
+-- certificate used.
+--
 readPrivateKey :: FilePath -> IO PrivateKey
 readPrivateKey filepath = do
-	content <- B.readFile filepath
-	let pkdata = case parsePEMKeyRSA content of
-		Nothing -> error ("no valid RSA key section")
-		Just x  -> L.fromChunks [x]
-	case KeyRSA.decodePrivate pkdata of
-		Left err     -> error ("cannot decode key: " ++ err)
-		Right (_,pk) -> return $ PrivRSA pk
+  content <- B.readFile filepath
+  case pemParseBS content of
+    Left err -> error err
+    Right pems ->
+      case List.find ((== "RSA PRIVATE KEY") . pemName) pems of
+        Just pem ->
+          case KeyRSA.decodePrivate $ L.fromChunks [pemContent pem] of
+            Left err -> error err
+            Right (_, x) -> return (PrivRSA x);
+        Nothing -> error "no private key file"
+
 
 data Stunnel =
 	  Client
@@ -225,7 +238,7 @@ doClient pargs = do
 		}
 
 	let crecv = if validCert pargs then certificateVerifyChain else (\_ -> return CertificateUsageAccept)
-	let clientstate = defaultParams
+	let clientstate = defaultParamsClient
 		{ pConnectVersion = TLS10
 		, pAllowedVersions = [TLS10,TLS11,TLS12]
 		, pCiphers = ciphers
@@ -245,7 +258,7 @@ doClient pargs = do
 				(StunnelSocket dst)  <- connectAddressDescription dstaddr
 
 				dsth <- socketToHandle dst ReadWriteMode
-				dstctx <- client clientstate rng dsth
+				dstctx <- contextNewOnHandle dsth clientstate rng
 				_    <- forkIO $ finally
 					(tlsclient srch dstctx)
 					(hClose srch >> hClose dsth)
