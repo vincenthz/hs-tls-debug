@@ -33,7 +33,7 @@ runTLS params hostname portNumber f = do
 	      (\(e :: SomeException) -> sClose sock >> error ("cannot open socket " ++ show sockaddr ++ " " ++ show e))
 	dsth <- socketToHandle sock ReadWriteMode
 	ctx <- contextNewOnHandle dsth params rng
-	f ctx
+	_ <- f ctx
 	hClose dsth
 
 getDefaultParams sStorage session = defaultParamsClient

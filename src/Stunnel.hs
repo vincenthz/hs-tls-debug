@@ -9,17 +9,12 @@ import System.Console.CmdArgs
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 
-import qualified Data.List as List
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Exception (finally, try, throw, catch, SomeException)
 import Control.Monad (when, forever)
 
 import Data.Char (isDigit)
-
-import Data.PEM(pemParseBS, pemName, pemContent)
-import Data.Certificate.X509(X509, decodeCertificate)
-import qualified Data.Certificate.KeyRSA as KeyRSA
 
 import qualified Crypto.Random.AESCtr as RNG
 import Network.TLS
@@ -103,39 +98,6 @@ clientProcess certs handle dsthandle dbg sessionStorage _ = do
 
 	ctx <- contextNewOnHandle handle serverState' rng
 	tlsserver ctx dsthandle
-
--- | Read a X.509 certificate from the named file.
---
-readCertificate :: FilePath -> IO X509
-readCertificate filepath = do
-  content <- B.readFile filepath
-  case pemParseBS content of
-    Left err -> error err
-    Right pems ->
-      case List.find ((== "CERTIFICATE") . pemName) pems of
-        Just pem ->
-          case decodeCertificate $ L.fromChunks [pemContent pem] of
-            Left err -> error err
-            Right x -> return x;
-        Nothing -> error "no certificate file"
-
-
--- | Read a private key from the named file. It must match the
--- certificate used.
---
-readPrivateKey :: FilePath -> IO PrivateKey
-readPrivateKey filepath = do
-  content <- B.readFile filepath
-  case pemParseBS content of
-    Left err -> error err
-    Right pems ->
-      case List.find ((== "RSA PRIVATE KEY") . pemName) pems of
-        Just pem ->
-          case KeyRSA.decodePrivate $ L.fromChunks [pemContent pem] of
-            Left err -> error err
-            Right (_, x) -> return (PrivRSA x);
-        Nothing -> error "no private key file"
-
 
 data Stunnel =
 	  Client
@@ -267,8 +229,8 @@ doClient pargs = do
 
 doServer :: Stunnel -> IO ()
 doServer pargs = do
-	cert    <- readCertificate $ certificate pargs
-	pk      <- readPrivateKey $ key pargs
+	cert    <- fileReadCertificate $ certificate pargs
+	pk      <- fileReadPrivateKey $ key pargs
 	srcaddr <- getAddressDescription (sourceType pargs) (source pargs)
 	dstaddr <- getAddressDescription (destinationType pargs) (destination pargs)
 
